@@ -6,6 +6,7 @@
 <title>Lịch Công Tác Cơ Quan - Ban Tổ Chức Thành Ủy Đà Nẵng</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
 <script>
@@ -329,7 +330,6 @@ Khi xếp lịch Lãnh đạo Ban đi công tác tại địa phương thì ph�
       <select id="moveTargetSession" style="width:100%;padding:9px;border:1px solid #ccc;border-radius:4px;margin-bottom:16px;">
         <option value="S">Sáng</option>
         <option value="C">Chiều</option>
-        <option value="T">Tối</option>
       </select>
     </div>
     <button class="btn btn-blue" onclick="confirmMoveEvent()">✅ Xác Nhận Chuyển</button>
@@ -372,7 +372,7 @@ if (localStorage.getItem(LOCK_STORAGE_KEY) === 'yes') {
 }
 
 const DAYS = ["Thứ Hai","Thứ Ba","Thứ Tư","Thứ Năm","Thứ Sáu","Thứ Bảy","Chủ Nhật"];
-const SESSIONS = [{key:"S",label:"S",name:"Sáng"},{key:"C",label:"C",name:"Chiều"},{key:"T",label:"T",name:"Tối"}];
+const SESSIONS = [{key:"S",label:"S",name:"Sáng"},{key:"C",label:"C",name:"Chiều"}];
 
 let scheduleData = [];   // flat list of row objects
 let isBanHanh = false;
@@ -438,7 +438,7 @@ function openMoveModal(id) {
   daySelect.innerHTML = DAYS.map((d, i) => `<option value="${i}" ${i === ev.dayIndex ? 'selected' : ''}>${d} (${getDateForDay(i)})</option>`).join('');
   document.getElementById('moveTargetSession').value = ev.session;
 
-  const sessName = ev.session === 'S' ? 'Sáng' : (ev.session === 'C' ? 'Chiều' : 'Tối');
+  const sessName = ev.session === 'S' ? 'Sáng' : 'Chiều';
   document.getElementById('moveModalCurrentInfo').textContent =
     `Đang ở: ${ev.day} - Buổi ${sessName}${ev.time ? ' - ' + ev.time : ''} - "${ev.content || '(chưa có nội dung)'}"`;
 
@@ -864,11 +864,11 @@ function fmt(d) {
 }
 
 // ===== BAN HÀNH =====
-function banHanh() {
+async function banHanh() {
   if (!confirm('Ban hành lịch tuần ' + document.getElementById('weekNumber').value + '?\nSau khi ban hành, hệ thống sẽ xuất Word + PDF chính thức. Bạn vẫn có thể tiếp tục sửa lịch sau đó nếu cần.')) return;
   isBanHanh = true;
   saveAll(true);
-  exportWord();
+  await exportWord();
   exportPDF();
   updateBanHanhBanner();
   alert('📢 Đã ban hành lịch tuần ' + document.getElementById('weekNumber').value + '! File Word và PDF đã được tải xuống.');
@@ -945,25 +945,35 @@ function sortedFilledRows() {
 }
 
 // Nhóm dữ liệu theo Ngày -> Buổi (liên tiếp) để tính rowspan giống bảng thật
+// Luôn tạo đủ 7 ngày x 3 buổi (kể cả buổi chưa có lịch → 1 dòng trống),
+// nhưng vẫn hỗ trợ NHIỀU sự kiện trong cùng 1 buổi nếu có.
 function buildGroupedRows() {
   const rows = sortedFilledRows();
-  const sessNames = { S:'Sáng', C:'Chiều', T:'Tối' };
+  const sessNames = { S:'Sáng', C:'Chiều' };
   const dayGroups = [];
-  let curDay = null;
 
-  rows.forEach(r => {
-    if (!curDay || curDay.dayIndex !== r.dayIndex) {
-      curDay = { dayIndex: r.dayIndex, dayName: r.day, dateStr: getDateForDay(r.dayIndex), rowCount: 0, sessionRuns: [] };
-      dayGroups.push(curDay);
-    }
-    curDay.rowCount++;
-    const lastRun = curDay.sessionRuns[curDay.sessionRuns.length - 1];
-    if (lastRun && lastRun.session === r.session) {
-      lastRun.events.push(r);
-    } else {
-      curDay.sessionRuns.push({ session: r.session, sessionName: sessNames[r.session], events: [r] });
-    }
+  DAYS.forEach((dayName, dIdx) => {
+    const dayEvents = rows.filter(r => r.dayIndex === dIdx);
+    const day = { dayIndex: dIdx, dayName: dayName, dateStr: getDateForDay(dIdx), rowCount: 0, sessionRuns: [] };
+
+    SESSIONS.forEach(sess => {
+      const sessEvents = dayEvents.filter(r => r.session === sess.key);
+      if (sessEvents.length > 0) {
+        day.sessionRuns.push({ session: sess.key, sessionName: sess.name, events: sessEvents });
+        day.rowCount += sessEvents.length;
+      } else {
+        // Chưa có lịch cho buổi này — vẫn thêm 1 dòng trống để hiện đủ cấu trúc tuần
+        day.sessionRuns.push({
+          session: sess.key, sessionName: sess.name,
+          events: [{ time:'', content:'', leader:'', participants:'', location:'', driver:'', dayIndex: dIdx, day: dayName, session: sess.key }]
+        });
+        day.rowCount += 1;
+      }
+    });
+
+    dayGroups.push(day);
   });
+
   return dayGroups;
 }
 
@@ -1098,43 +1108,204 @@ function buildSharedDocCss() {
 }
 
 // ===== EXPORT WORD =====
-function exportWord() {
+// ===== TẠO FILE .DOCX THẬT (OOXML chuẩn) BẰNG JSZIP =====
+// Lý do đổi cách làm: kiểu file .doc cũ (HTML giả trang) chỉ Word Desktop mở tốt,
+// Word trên điện thoại/app khác không nhận diện đúng định dạng. Cách này tạo đúng
+// file nhị phân chuẩn OOXML, mở được trên MỌI thiết bị (Word Desktop/Mobile, Google Docs, Pages...).
+
+function escXml(s) {
+  return (s || '').toString()
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// 1 paragraph XML — opts: {bold, italic, underline, size (pt), align ('center'|'left'), spacingAfter}
+function wxPara(text, opts) {
+  opts = opts || {};
+  const sz = (opts.size || 13) * 2; // pt -> half-points
+  let rPr = `<w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/>`;
+  if (opts.bold) rPr += '<w:b/><w:bCs/>';
+  if (opts.italic) rPr += '<w:i/><w:iCs/>';
+  if (opts.underline) rPr += '<w:u w:val="single"/>';
+  let pPr = '';
+  if (opts.align) pPr += `<w:jc w:val="${opts.align}"/>`;
+  pPr += `<w:spacing w:after="${opts.spacingAfter != null ? opts.spacingAfter : 60}"/>`;
+  const text2 = escXml(text);
+  return `<w:p><w:pPr>${pPr}</w:pPr><w:r><w:rPr>${rPr}</w:rPr><w:t xml:space="preserve">${text2}</w:t></w:r></w:p>`;
+}
+
+function wxTcPr(widthTwips, opts) {
+  opts = opts || {};
+  let tcPr = `<w:tcW w:w="${widthTwips}" w:type="dxa"/><w:vAlign w:val="${opts.vAlign || 'center'}"/>`;
+  if (opts.shade) tcPr += `<w:shd w:val="clear" w:color="auto" w:fill="${opts.shade}"/>`;
+  if (opts.borders === 'none') tcPr += `<w:tcBorders><w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/></w:tcBorders>`;
+  if (opts.vMerge === 'restart') tcPr += '<w:vMerge w:val="restart"/>';
+  else if (opts.vMerge === 'continue') tcPr += '<w:vMerge/>';
+  return `<w:tcPr>${tcPr}</w:tcPr>`;
+}
+
+function wxCell(text, widthTwips, opts) {
+  opts = opts || {};
+  const tcPr = wxTcPr(widthTwips, opts);
+  if (opts.vMerge === 'continue') {
+    // Ô bị gộp (tiếp nối) — chỉ cần 1 đoạn văn rỗng, Word sẽ tự ẩn/gộp hiển thị
+    return `<w:tc>${tcPr}<w:p/></w:tc>`;
+  }
+  const sz = (opts.size || 11) * 2;
+  let rPr = `<w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/>`;
+  if (opts.bold) rPr += '<w:b/><w:bCs/>';
+  const align = opts.align ? `<w:jc w:val="${opts.align}"/>` : '';
+  return `<w:tc>${tcPr}<w:p><w:pPr>${align}</w:pPr><w:r><w:rPr>${rPr}</w:rPr><w:t xml:space="preserve">${escXml(text)}</w:t></w:r></w:p></w:tc>`;
+}
+
+// Ô chứa NHIỀU đoạn văn (dùng cho khối tiêu đề 2 cột) — parasXml là chuỗi các <w:p>...</w:p> đã build sẵn bằng wxPara
+function wxCellMulti(parasXml, widthTwips, opts) {
+  return `<w:tc>${wxTcPr(widthTwips, opts)}${parasXml}</w:tc>`;
+}
+
+function buildWordDocumentXml() {
   const weekNum = document.getElementById('weekNumber').value;
+  const start = document.getElementById('weekStart').value;
+  const end = document.getElementById('weekEnd').value;
+  const docNumber = document.getElementById('docNumber').value;
+  const issueDateText = formatIssueDateVN(document.getElementById('issueDate').value);
+  const dayGroups = buildGroupedRows();
+  const nextWeekLines = notesToLines(document.getElementById('nextWeekNotes').value);
+  const luuYLines = notesToLines(document.getElementById('luuYNotes').value);
 
-  const htmlContent = `
-    <html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
-    <head>
-      <meta charset="utf-8">
-      <!--[if gte mso 9]>
-      <xml><w:WordDocument><w:View>Print</w:View><w:Zoom>100</w:Zoom><w:DoNotOptimizeForBrowser/></w:WordDocument></xml>
-      <![endif]-->
-      <style>
-        /* Word chỉ nhận đúng margin khi khai báo @page có TÊN (Section1) kèm cú pháp mso-,
-           và phần nội dung phải nằm trong <div class="Section1">. Khai báo @page trần không tên
-           (không có mso-page-orientation) thường bị Word bỏ qua, khiến nó dùng lề mặc định 2.5cm. */
-        @page Section1 {
-          size: 21cm 29.7cm;
-          margin: 1.0cm 1.0cm 1.0cm 1.0cm;
-          mso-header-margin: .5cm;
-          mso-footer-margin: .5cm;
-          mso-paper-source: 0;
-        }
-        div.Section1 { page: Section1; }
-        ${buildSharedDocCss()}
-      </style>
-    </head>
-    <body>
-      <div class="Section1">
-        ${buildHeaderHtml()}
-        ${buildMainTableHtml()}
-        ${buildFooterHtml()}
-      </div>
-    </body>
-    </html>
-  `;
+  let body = '';
 
-  const blob = new Blob(['\ufeff', htmlContent], { type: 'application/msword' });
-  downloadBlob(blob, `lich_cong_tac_tuan_${weekNum}.doc`);
+  // ===== KHỐI TIÊU ĐỀ: bảng 2 cột KHÔNG viền, giống hệt văn bản gốc =====
+  const headerColW = [5170, 5602]; // tổng ≈ 10772 (khớp bảng chính)
+  const leftParas =
+    wxPara('THÀNH ỦY ĐÀ NẴNG', { align:'center', size:14, spacingAfter:0 }) +
+    wxPara('BAN TỔ CHỨC', { align:'center', size:14, bold:true, spacingAfter:0 }) +
+    wxPara('*', { align:'center', size:13, spacingAfter:0 }) +
+    wxPara('Số ' + docNumber, { align:'center', size:14, spacingAfter:0 });
+  const rightParas =
+    wxPara('ĐẢNG CỘNG SẢN VIỆT NAM', { align:'center', size:15, bold:true, underline:true, spacingAfter:0 }) +
+    wxPara('Đà Nẵng, ' + issueDateText, { align:'center', size:14, italic:true, spacingAfter:0 });
+
+  body += `<w:tbl>
+    <w:tblPr><w:tblW w:w="10772" w:type="dxa"/><w:tblBorders>
+      <w:top w:val="nil"/><w:left w:val="nil"/><w:bottom w:val="nil"/><w:right w:val="nil"/>
+      <w:insideH w:val="nil"/><w:insideV w:val="nil"/>
+    </w:tblBorders></w:tblPr>
+    <w:tblGrid><w:gridCol w:w="${headerColW[0]}"/><w:gridCol w:w="${headerColW[1]}"/></w:tblGrid>
+    <w:tr>
+      ${wxCellMulti(leftParas, headerColW[0], { borders:'none', vAlign:'top' })}
+      ${wxCellMulti(rightParas, headerColW[1], { borders:'none', vAlign:'top' })}
+    </w:tr>
+  </w:tbl>`;
+
+  body += wxPara('', { spacingAfter:100 }); // khoảng trống sau bảng tiêu đề (bảng không tự có margin-bottom)
+  body += wxPara('TUẦN ' + weekNum + ': LỊCH CÔNG TÁC TUẦN CỦA BAN TỔ CHỨC THÀNH ỦY', { align:'center', size:15, bold:true, spacingAfter:40 });
+  body += wxPara('(Từ ngày ' + start + ' đến ngày ' + end + ')', { align:'center', size:14, italic:true, spacingAfter:40 });
+  body += wxPara('-----', { align:'center', size:13, spacingAfter:120 });
+
+  // ===== BẢNG CHÍNH — 8 cột, gộp ô THẬT (vMerge) cho Ngày & Buổi =====
+  const colW = [970, 646, 646, 2800, 1293, 1400, 1616, 862]; // xấp xỉ tỉ lệ 9/6/6/26/12/13/15/8%
+  const headers = ['Thời gian','Buổi','Giờ','Nội dung','Lãnh đạo','Thành phần các phòng','Địa điểm','Lái xe'];
+
+  let tableRows = '<w:tr>' + headers.map((h,i) => wxCell(h, colW[i], { bold:true, shade:'DCDCDC', align:'center' })).join('') + '</w:tr>';
+
+  dayGroups.forEach(day => {
+    let isFirstRowOfDay = true;
+    day.sessionRuns.forEach(run => {
+      run.events.forEach((r, idxInRun) => {
+        const dayMerge = isFirstRowOfDay ? 'restart' : 'continue';
+        const sessMerge = idxInRun === 0 ? 'restart' : 'continue';
+        const dayText = isFirstRowOfDay ? (day.dayName + ' (' + day.dateStr + ')') : '';
+        const sessText = idxInRun === 0 ? run.sessionName : '';
+
+        tableRows += '<w:tr>' +
+          wxCell(dayText, colW[0], { align:'center', vMerge: dayMerge }) +
+          wxCell(sessText, colW[1], { align:'center', vMerge: sessMerge }) +
+          wxCell(r.time, colW[2], { align:'center' }) +
+          wxCell(r.content, colW[3], {}) +
+          wxCell(r.leader, colW[4], {}) +
+          wxCell(r.participants, colW[5], {}) +
+          wxCell(r.location, colW[6], {}) +
+          wxCell(r.driver, colW[7], {}) +
+          '</w:tr>';
+
+        isFirstRowOfDay = false;
+      });
+    });
+  });
+
+  body += `<w:tbl>
+    <w:tblPr><w:tblW w:w="10772" w:type="dxa"/><w:tblBorders>
+      <w:top w:val="single" w:sz="4" w:color="000000"/><w:left w:val="single" w:sz="4" w:color="000000"/>
+      <w:bottom w:val="single" w:sz="4" w:color="000000"/><w:right w:val="single" w:sz="4" w:color="000000"/>
+      <w:insideH w:val="single" w:sz="4" w:color="000000"/><w:insideV w:val="single" w:sz="4" w:color="000000"/>
+    </w:tblBorders></w:tblPr>
+    <w:tblGrid>${colW.map(w => `<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>
+    ${tableRows}
+  </w:tbl>`;
+
+  body += wxPara('', { spacingAfter:60 }); // khoảng trống nhỏ sau bảng
+
+  if (nextWeekLines.length > 0) {
+    body += wxPara('* TUẦN ' + (parseInt(weekNum) + 1) + ':', { bold:true, size:13, spacingAfter:40 });
+    nextWeekLines.forEach(line => { body += wxPara('- ' + line, { size:13, spacingAfter:20 }); });
+  }
+  if (luuYLines.length > 0) {
+    body += wxPara('* Lưu ý:', { bold:true, size:13, spacingAfter:40 });
+    luuYLines.forEach(line => { body += wxPara('- ' + line, { size:13, spacingAfter:20 }); });
+  }
+
+  body += `<w:sectPr>
+    <w:pgSz w:w="11906" w:h="16838"/>
+    <w:pgMar w:top="567" w:right="567" w:bottom="567" w:left="567" w:header="283" w:footer="283" w:gutter="0"/>
+  </w:sectPr>`;
+
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:body>${body}</w:body>
+</w:document>`;
+}
+
+async function exportWord() {
+  const weekNum = document.getElementById('weekNumber').value;
+  const zip = new JSZip();
+
+  zip.file('[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`);
+
+  zip.file('_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`);
+
+  zip.file('word/_rels/document.xml.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`);
+
+  zip.file('word/styles.xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:docDefaults>
+    <w:rPrDefault><w:rPr>
+      <w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"/>
+      <w:sz w:val="26"/><w:szCs w:val="26"/>
+    </w:rPr></w:rPrDefault>
+  </w:docDefaults>
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+</w:styles>`);
+
+  zip.file('word/document.xml', buildWordDocumentXml());
+
+  const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+  downloadBlob(blob, `lich_cong_tac_tuan_${weekNum}.docx`);
 }
 
 // ===== EXPORT PDF (giống hệt bản Word — dùng chung CSS, chỉ khác cách render) =====
@@ -1195,7 +1366,7 @@ function exportExcel() {
   const rows = sortedFilledRows();
   const wsData = [
     ["Thời gian","Buổi","Giờ","Nội dung","Lãnh đạo","Thành phần các phòng","Địa điểm","Lái xe"],
-    ...rows.map(r => [r.day, r.session==='S'?'Sáng':(r.session==='C'?'Chiều':'Tối'), r.time, r.content, r.leader, r.participants, r.location, r.driver])
+    ...rows.map(r => [r.day, r.session==='S'?'Sáng':'Chiều', r.time, r.content, r.leader, r.participants, r.location, r.driver])
   ];
   const ws = XLSX.utils.aoa_to_sheet(wsData);
   ws['!cols'] = [{wch:12},{wch:8},{wch:8},{wch:40},{wch:16},{wch:20},{wch:24},{wch:12}];
