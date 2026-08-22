@@ -340,8 +340,8 @@ Khi xếp lịch Lãnh đạo Ban đi công tác tại địa phương thì ph�
 <script>
 // ===== KHÓA MẬT KHẨU =====
 // Mật khẩu KHÔNG lưu dạng chữ trần — chỉ lưu mã băm SHA-256 của nó.
-// Mật khẩu tạm thời hiện tại: btc2026 (nhờ Claude đổi lại nếu muốn đặt mật khẩu khác)
-const LOCK_PASSWORD_HASH = '6a2326d7c9b55b9928e3e80f13a4b7358991473926aa33320b7406a04f0b5451';
+// Mật khẩu tạm thời hiện tại: btctu2026 (nhờ Claude đổi lại nếu muốn đặt mật khẩu khác)
+const LOCK_PASSWORD_HASH = '0ea6534b75326324e4f8e85628f4c3bced1b0c09490542fb61dea525020ac210';
 const LOCK_STORAGE_KEY = 'lichCongTac_unlocked';
 
 async function sha256Hex(text) {
@@ -746,18 +746,30 @@ function loadWeek(weekNum) {
 
   // 1) Hiện tạm dữ liệu local trong lúc chờ cloud phản hồi (mượt hơn)
   const saved = localStorage.getItem(key);
+  let usedSaved = false;
   if (saved) {
-    const data = JSON.parse(saved);
-    scheduleData = data.scheduleData;
-    document.getElementById('weekStart').value = data.weekStart;
-    document.getElementById('weekEnd').value = data.weekEnd;
-    document.getElementById('docNumber').value = data.docNumber || (weekNum + '-LT/BTCTU');
-    document.getElementById('issueDate').value = data.issueDate || '';
-    document.getElementById('nextWeekNotes').value = data.nextWeekNotes || '';
-    document.getElementById('luuYNotes').value = data.luuYNotes || document.getElementById('luuYNotes').value;
-    isBanHanh = data.isBanHanh || false;
-    weekBanHanhAt = data.weekBanHanhAt || null;
-  } else {
+    try {
+      const data = JSON.parse(saved);
+      // Chỉ tin dữ liệu nếu đúng định dạng (mảng scheduleData thật sự tồn tại) —
+      // tránh vỡ app nếu localStorage còn giữ dữ liệu cũ/hỏng từ phiên bản trước.
+      if (Array.isArray(data.scheduleData)) {
+        scheduleData = data.scheduleData;
+        document.getElementById('weekStart').value = data.weekStart || document.getElementById('weekStart').value;
+        document.getElementById('weekEnd').value = data.weekEnd || document.getElementById('weekEnd').value;
+        document.getElementById('docNumber').value = data.docNumber || (weekNum + '-LT/BTCTU');
+        document.getElementById('issueDate').value = data.issueDate || '';
+        document.getElementById('nextWeekNotes').value = data.nextWeekNotes || '';
+        document.getElementById('luuYNotes').value = data.luuYNotes || document.getElementById('luuYNotes').value;
+        isBanHanh = data.isBanHanh || false;
+        weekBanHanhAt = data.weekBanHanhAt || null;
+        usedSaved = true;
+      }
+    } catch (e) {
+      // JSON hỏng — bỏ qua, coi như chưa có dữ liệu, không làm crash app
+      console.warn('Dữ liệu lưu cục bộ cho tuần này bị lỗi định dạng, đã bỏ qua:', e);
+    }
+  }
+  if (!usedSaved) {
     initEmptyWeek();
     document.getElementById('docNumber').value = weekNum + '-LT/BTCTU';
     isBanHanh = false;
@@ -781,9 +793,10 @@ function attachFirebaseListener(weekNum) {
       if (!data) return; // chưa có dữ liệu trên cloud cho tuần này
       // Chỉ áp dụng nếu đang đứng đúng tuần này (tránh ghi đè khi đã chuyển tuần)
       if (document.getElementById('weekNumber').value != weekNum) return;
+      if (!Array.isArray(data.scheduleData)) return; // dữ liệu trên cloud không hợp lệ — bỏ qua, không làm crash app
       scheduleData = data.scheduleData;
-      document.getElementById('weekStart').value = data.weekStart;
-      document.getElementById('weekEnd').value = data.weekEnd;
+      document.getElementById('weekStart').value = data.weekStart || document.getElementById('weekStart').value;
+      document.getElementById('weekEnd').value = data.weekEnd || document.getElementById('weekEnd').value;
       document.getElementById('docNumber').value = data.docNumber || document.getElementById('docNumber').value;
       document.getElementById('issueDate').value = data.issueDate || document.getElementById('issueDate').value;
       document.getElementById('nextWeekNotes').value = data.nextWeekNotes || '';
@@ -1236,6 +1249,7 @@ function buildWordDocumentXml() {
 
   dayGroups.forEach(day => {
     let isFirstRowOfDay = true;
+    const dayShade = (day.dayIndex % 2 === 1) ? 'EAF1F8' : null; // Xen kẽ theo ngày: Thứ 2 trắng, Thứ 3 xanh nhạt, Thứ 4 trắng, Thứ 5 xanh nhạt...
     day.sessionRuns.forEach(run => {
       run.events.forEach((r, idxInRun) => {
         const dayMerge = isFirstRowOfDay ? 'restart' : 'continue';
@@ -1245,14 +1259,14 @@ function buildWordDocumentXml() {
         const redColor = isChangedAfterBanHanh(r) ? 'FF0000' : null;
 
         tableRows += '<w:tr>' +
-          wxCell(dayText, colW[0], { align:'center', vMerge: dayMerge, color: redColor }) +
-          wxCell(sessText, colW[1], { align:'center', vMerge: sessMerge, color: redColor }) +
-          wxCell(r.time, colW[2], { align:'center', color: redColor }) +
-          wxCell(r.content, colW[3], { color: redColor }) +
-          wxCell(r.leader, colW[4], { color: redColor }) +
-          wxCell(r.participants, colW[5], { color: redColor }) +
-          wxCell(r.location, colW[6], { color: redColor }) +
-          wxCell(r.driver, colW[7], { color: redColor }) +
+          wxCell(dayText, colW[0], { align:'center', vMerge: dayMerge, color: redColor, shade: dayShade }) +
+          wxCell(sessText, colW[1], { align:'center', vMerge: sessMerge, color: redColor, shade: dayShade }) +
+          wxCell(r.time, colW[2], { align:'center', color: redColor, shade: dayShade }) +
+          wxCell(r.content, colW[3], { color: redColor, shade: dayShade }) +
+          wxCell(r.leader, colW[4], { color: redColor, shade: dayShade }) +
+          wxCell(r.participants, colW[5], { color: redColor, shade: dayShade }) +
+          wxCell(r.location, colW[6], { color: redColor, shade: dayShade }) +
+          wxCell(r.driver, colW[7], { color: redColor, shade: dayShade }) +
           '</w:tr>';
 
         isFirstRowOfDay = false;
