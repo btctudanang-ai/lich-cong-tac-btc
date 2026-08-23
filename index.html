@@ -4,11 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Lịch Công Tác Cơ Quan - Ban Tổ Chức Thành Ủy Đà Nẵng</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" crossorigin="anonymous"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js" crossorigin="anonymous"></script>
 <script>
   // Firebase config - dự án lich-cong-tac-btc
   const firebaseConfig = {
@@ -218,6 +218,8 @@ tbody td textarea { min-height:34px; }
     <button class="btn btn-purple" onclick="exportExcel()">📊 XUẤT EXCEL</button>
     <button class="btn btn-blue" onclick="exportWord()">📄 XUẤT WORD</button>
     <button class="btn btn-blue" onclick="exportPDF()">📕 XUẤT PDF</button>
+    <input type="file" id="wordImportInput" accept=".docx" style="display:none" onchange="handleWordImportFile(event)">
+    <button class="btn btn-teal" onclick="document.getElementById('wordImportInput').click()">📥 NHẬP TỪ WORD</button>
     <button class="btn btn-red" onclick="deleteSelected()">🗑️ XÓA</button>
   </div>
 </div>
@@ -337,6 +339,19 @@ Khi xếp lịch Lãnh đạo Ban đi công tác tại địa phương thì ph�
   </div>
 </div>
 
+<!-- Modal Xem Trước Nhập Word -->
+<div class="modal-overlay" id="importModal">
+  <div class="modal-box" style="max-width:600px;">
+    <span class="close-x" onclick="closeImportModal()">&times;</span>
+    <h3>📥 Xem Trước Dữ Liệu Nhập Từ Word</h3>
+    <div id="importPreviewInfo" style="margin:10px 0 14px;color:#444;font-size:13px;"></div>
+    <div id="importPreviewList" style="max-height:280px;overflow-y:auto;margin-bottom:16px;font-size:12.5px;border:1px solid #eee;border-radius:6px;padding:8px;"></div>
+    <button class="btn btn-green" onclick="confirmImport('append')">➕ Thêm Vào Lịch Hiện Tại</button>
+    <button class="btn btn-red" onclick="confirmImport('replace')">🔁 Thay Thế Toàn Bộ Lịch Tuần Này</button>
+    <button class="btn btn-gray" onclick="closeImportModal()">Hủy</button>
+  </div>
+</div>
+
 <script>
 // ===== KHÓA MẬT KHẨU =====
 // Mật khẩu KHÔNG lưu dạng chữ trần — chỉ lưu mã băm SHA-256 của nó.
@@ -396,6 +411,183 @@ function addEvent(dayIndex, sessionKey) {
   scheduleData.push(newEventRow(dayIndex, sessionKey));
   renderTable();
   scheduleAutoSave();
+}
+
+// ===== NHẬP LỊCH TỪ FILE WORD (.docx) =====
+async function handleWordImportFile(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const docXmlFile = zip.file('word/document.xml');
+    if (!docXmlFile) {
+      alert('❌ File này không đúng định dạng .docx (không tìm thấy nội dung văn bản bên trong). Hãy chắc chắn đây là file Word thật, không phải file .doc kiểu cũ.');
+      return;
+    }
+    const xmlText = await docXmlFile.async('string');
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlText, 'application/xml');
+    if (doc.getElementsByTagName('parsererror').length > 0) {
+      alert('❌ Không đọc được nội dung file Word (file có thể bị hỏng).');
+      return;
+    }
+
+    const result = parseScheduleTableFromDocXml(doc);
+    if (result.events.length === 0) {
+      alert('⚠️ Không tìm thấy bảng lịch hợp lệ trong file Word này.\nHãy chắc chắn file có bảng với các cột: Thời gian/Ngày, Buổi, Giờ, Nội dung...');
+      return;
+    }
+    showImportPreview(result);
+  } catch (err) {
+    alert('❌ Lỗi khi đọc file Word: ' + err.message);
+  } finally {
+    e.target.value = ''; // reset để lần sau chọn lại cùng file vẫn kích hoạt onchange
+  }
+}
+
+function parseScheduleTableFromDocXml(doc) {
+  const tables = Array.from(doc.getElementsByTagName('w:tbl'));
+  let mainTable = null, maxRows = 0;
+  tables.forEach(t => {
+    const rowCount = t.getElementsByTagName('w:tr').length;
+    if (rowCount > maxRows) { maxRows = rowCount; mainTable = t; }
+  });
+  if (!mainTable) return { events: [], skippedToi: 0 };
+
+  const rows = Array.from(mainTable.getElementsByTagName('w:tr'));
+  if (rows.length < 2) return { events: [], skippedToi: 0 };
+
+  function cellText(tc) {
+    // Duyệt toàn bộ node con: <w:t> lấy chữ, <w:br>/<w:tab> và ranh giới đoạn văn <w:p>
+    // đều chèn khoảng trắng (văn bản thật thường tách nội dung 1 ô thành nhiều đoạn <w:p>,
+    // ví dụ "Thời" và "gian" nằm ở 2 đoạn riêng — ghép dính liền sẽ sai từ khóa nhận diện cột).
+    let result = '';
+    function walk(node) {
+      Array.from(node.childNodes).forEach(child => {
+        if (child.nodeType !== 1) return;
+        const tag = child.tagName;
+        if (tag === 'w:t') {
+          result += child.textContent;
+        } else if (tag === 'w:br' || tag === 'w:tab' || tag === 'w:cr') {
+          result += ' ';
+        } else if (tag === 'w:p') {
+          walk(child);
+          result += ' '; // hết 1 đoạn văn trong ô — thêm khoảng trắng phân cách
+        } else {
+          walk(child);
+        }
+      });
+    }
+    walk(tc);
+    return result.replace(/\s+/g, ' ').trim();
+  }
+  function isVMergeContinue(tc) {
+    const vMerges = tc.getElementsByTagName('w:vMerge');
+    if (vMerges.length === 0) return false;
+    const val = vMerges[0].getAttribute('w:val');
+    return !val || val !== 'restart';
+  }
+  function getDirectCells(tr) {
+    // Chỉ lấy các <w:tc> con trực tiếp của <w:tr>, tránh lấy nhầm bảng lồng bên trong
+    return Array.from(tr.childNodes).filter(n => n.nodeType === 1 && n.tagName === 'w:tc');
+  }
+
+  const headerCells = getDirectCells(rows[0]);
+  const headerTexts = headerCells.map(cellText);
+
+  function findColIndex(keywords) {
+    return headerTexts.findIndex(h => keywords.some(k => h.toLowerCase().includes(k)));
+  }
+  const colMap = {
+    day: findColIndex(['thời gian', 'ngày']),
+    session: findColIndex(['buổi']),
+    time: findColIndex(['giờ']),
+    content: findColIndex(['nội dung']),
+    leader: findColIndex(['lãnh đạo', 'chủ trì']),
+    participants: findColIndex(['thành phần']),
+    location: findColIndex(['địa điểm']),
+    driver: findColIndex(['lái xe'])
+  };
+  if (colMap.content === -1) return { events: [], skippedToi: 0 }; // không nhận diện được cấu trúc bảng
+
+  const lastValueByCol = {};
+  const events = [];
+  let skippedToi = 0;
+
+  for (let i = 1; i < rows.length; i++) {
+    const tcs = getDirectCells(rows[i]);
+    const rowValues = {};
+
+    Object.keys(colMap).forEach(key => {
+      const idx = colMap[key];
+      if (idx === -1 || !tcs[idx]) { rowValues[key] = lastValueByCol[key] || ''; return; }
+      const tc = tcs[idx];
+      if (isVMergeContinue(tc)) {
+        rowValues[key] = lastValueByCol[key] || '';
+      } else {
+        const txt = cellText(tc);
+        rowValues[key] = txt;
+        lastValueByCol[key] = txt;
+      }
+    });
+
+    if (!rowValues.content || !rowValues.content.trim()) continue; // dòng trống — bỏ qua
+
+    const dayText = rowValues.day || '';
+    const dayIndex = DAYS.findIndex(d => dayText.includes(d));
+    if (dayIndex === -1) continue; // không nhận diện được ngày — bỏ qua dòng này
+
+    let sessionKey = null;
+    const sessText = (rowValues.session || '').toLowerCase();
+    if (sessText.includes('sáng')) sessionKey = 'S';
+    else if (sessText.includes('chiều')) sessionKey = 'C';
+    else if (sessText.includes('tối')) { skippedToi++; continue; } // buổi Tối không còn hỗ trợ
+    else continue; // không xác định được buổi — bỏ qua
+
+    events.push({
+      id: uid(), day: DAYS[dayIndex], dayIndex, session: sessionKey,
+      time: rowValues.time || '', content: rowValues.content || '',
+      leader: rowValues.leader || '', participants: rowValues.participants || '',
+      location: rowValues.location || '', driver: rowValues.driver || '',
+      status: 'normal'
+    });
+  }
+
+  return { events, skippedToi };
+}
+
+let pendingImportEvents = [];
+function showImportPreview(result) {
+  pendingImportEvents = result.events;
+  let info = `Tìm thấy <b>${result.events.length}</b> sự kiện hợp lệ trong file Word.`;
+  if (result.skippedToi > 0) info += ` (Đã bỏ qua ${result.skippedToi} sự kiện buổi Tối — không còn hỗ trợ.)`;
+  document.getElementById('importPreviewInfo').innerHTML = info;
+  document.getElementById('importPreviewList').innerHTML = result.events.map(ev =>
+    `<div style="padding:6px 0;border-bottom:1px solid #eee;">
+      <b>${esc(ev.day)} (${ev.session==='S'?'Sáng':'Chiều'})</b> ${esc(ev.time)} — ${esc(ev.content)}<br>
+      <small style="color:#888;">${esc(ev.leader)}${ev.location ? ' | ' + esc(ev.location) : ''}</small>
+    </div>`
+  ).join('');
+  document.getElementById('importModal').classList.add('show');
+}
+function closeImportModal() {
+  document.getElementById('importModal').classList.remove('show');
+  pendingImportEvents = [];
+}
+function confirmImport(mode) {
+  if (mode === 'replace') {
+    if (!confirm('Thay thế TOÀN BỘ lịch tuần hiện tại bằng dữ liệu vừa nhập? Dữ liệu cũ sẽ mất.')) return;
+    scheduleData = pendingImportEvents;
+  } else {
+    scheduleData = scheduleData.concat(pendingImportEvents);
+  }
+  renderTable();
+  scheduleAutoSave();
+  const count = pendingImportEvents.length;
+  closeImportModal();
+  alert('✅ Đã nhập ' + count + ' sự kiện từ file Word.');
 }
 
 function removeRow(id) {
@@ -1050,10 +1242,10 @@ function buildMainTableHtml() {
           <th style="width:9%">Thời gian</th>
           <th style="width:6%">Buổi</th>
           <th style="width:6%">Giờ</th>
-          <th style="width:26%">Nội dung</th>
-          <th style="width:12%">Lãnh đạo</th>
-          <th style="width:13%">Thành phần các phòng</th>
-          <th style="width:15%">Địa điểm</th>
+          <th style="width:33%">Nội dung</th>
+          <th style="width:10%">Lãnh đạo</th>
+          <th style="width:14%">Thành phần các phòng</th>
+          <th style="width:13%">Địa điểm</th>
           <th style="width:8%">Lái xe</th>
         </tr>
       </thead>
@@ -1234,7 +1426,7 @@ function buildWordDocumentXml() {
   body += wxPara('-----', { align:'center', size:13, spacingAfter:120 });
 
   // ===== BẢNG CHÍNH — 8 cột, gộp ô THẬT (vMerge) cho Ngày & Buổi =====
-  const colW = [970, 646, 646, 2800, 1293, 1400, 1616, 862]; // xấp xỉ tỉ lệ 9/6/6/26/12/13/15/8%
+  const colW = [970, 646, 646, 3409, 1000, 1400, 1300, 862]; // đã tăng Nội dung, giảm Lãnh đạo + Địa điểm
   const headers = ['Thời gian','Buổi','Giờ','Nội dung','Lãnh đạo','Thành phần các phòng','Địa điểm','Lái xe'];
 
   let tableRows = '<w:tr>' + headers.map((h,i) => wxCell(h, colW[i], { bold:true, shade:'DCDCDC', align:'center' })).join('') + '</w:tr>';
