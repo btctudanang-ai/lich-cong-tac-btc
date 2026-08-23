@@ -512,6 +512,7 @@ function parseScheduleTableFromDocXml(doc) {
   const lastValueByCol = {};
   const events = [];
   let skippedToi = 0;
+  const warnings = []; // Các dòng có nội dung nhưng thiếu dữ liệu (ngày/buổi không rõ, hoặc thiếu giờ)
 
   for (let i = 1; i < rows.length; i++) {
     const tcs = getDirectCells(rows[i]);
@@ -530,18 +531,30 @@ function parseScheduleTableFromDocXml(doc) {
       }
     });
 
-    if (!rowValues.content || !rowValues.content.trim()) continue; // dòng trống — bỏ qua
+    if (!rowValues.content || !rowValues.content.trim()) continue; // dòng trống — bỏ qua, không tính là lỗi
 
     const dayText = rowValues.day || '';
     const dayIndex = DAYS.findIndex(d => dayText.includes(d));
-    if (dayIndex === -1) continue; // không nhận diện được ngày — bỏ qua dòng này
+    if (dayIndex === -1) {
+      warnings.push({ reason: 'Không xác định được NGÀY', day: dayText || '(trống)', session: rowValues.session || '', time: rowValues.time || '', content: rowValues.content });
+      continue; // không nhận diện được ngày — bỏ qua dòng này, đã ghi cảnh báo
+    }
 
     let sessionKey = null;
     const sessText = (rowValues.session || '').toLowerCase();
     if (sessText.includes('sáng')) sessionKey = 'S';
     else if (sessText.includes('chiều')) sessionKey = 'C';
     else if (sessText.includes('tối')) { skippedToi++; continue; } // buổi Tối không còn hỗ trợ
-    else continue; // không xác định được buổi — bỏ qua
+    else {
+      warnings.push({ reason: 'Không xác định được BUỔI (Sáng/Chiều)', day: DAYS[dayIndex], session: rowValues.session || '(trống)', time: rowValues.time || '', content: rowValues.content });
+      continue; // không xác định được buổi — bỏ qua dòng này, đã ghi cảnh báo
+    }
+
+    if (!rowValues.time || !rowValues.time.trim()) {
+      // Vẫn nhập bình thường (thiếu giờ không phải lỗi nghiêm trọng, có thể là việc cả buổi/không rõ giờ cụ thể),
+      // nhưng vẫn ghi cảnh báo để người dùng biết mà bổ sung thêm nếu cần.
+      warnings.push({ reason: 'Thiếu GIỜ cụ thể (vẫn nhập, nhưng nên kiểm tra lại)', day: DAYS[dayIndex], session: sessionKey==='S'?'Sáng':'Chiều', time: '(trống)', content: rowValues.content });
+    }
 
     events.push({
       id: uid(), day: DAYS[dayIndex], dayIndex, session: sessionKey,
@@ -552,7 +565,7 @@ function parseScheduleTableFromDocXml(doc) {
     });
   }
 
-  return { events, skippedToi };
+  return { events, skippedToi, warnings };
 }
 
 let pendingImportEvents = [];
@@ -560,13 +573,53 @@ function showImportPreview(result) {
   pendingImportEvents = result.events;
   let info = `Tìm thấy <b>${result.events.length}</b> sự kiện hợp lệ trong file Word.`;
   if (result.skippedToi > 0) info += ` (Đã bỏ qua ${result.skippedToi} sự kiện buổi Tối — không còn hỗ trợ.)`;
+
+  // Chia cảnh báo thành 2 nhóm: bị BỎ QUA hẳn (không nhập được) và CHỈ THIẾU GIỜ (vẫn nhập nhưng cần kiểm tra)
+  const warnings = result.warnings || [];
+  const skippedWarnings = warnings.filter(w => w.reason.startsWith('Không xác định'));
+  const timeWarnings = warnings.filter(w => w.reason.startsWith('Thiếu GIỜ'));
+
+  if (skippedWarnings.length > 0) {
+    info += `<br><span style="color:#d9534f;font-weight:600;">⚠️ Có ${skippedWarnings.length} dòng KHÔNG nhập được (xem chi tiết bên dưới) — hãy tự thêm thủ công nếu cần.</span>`;
+  }
+  if (timeWarnings.length > 0) {
+    info += `<br><span style="color:#f0ad4e;font-weight:600;">⚠️ Có ${timeWarnings.length} sự kiện thiếu GIỜ cụ thể (vẫn được nhập, nhưng nên kiểm tra lại).</span>`;
+  }
   document.getElementById('importPreviewInfo').innerHTML = info;
-  document.getElementById('importPreviewList').innerHTML = result.events.map(ev =>
+
+  let listHtml = '';
+
+  if (skippedWarnings.length > 0) {
+    listHtml += `<div style="background:#fff0f0;border:1px solid #f5c6cb;border-radius:6px;padding:8px;margin-bottom:10px;">
+      <b style="color:#d9534f;">❌ Các dòng KHÔNG nhập được:</b>
+      ${skippedWarnings.map(w => `
+        <div style="padding:5px 0;border-top:1px dashed #f5c6cb;font-size:12px;">
+          <b>${esc(w.reason)}</b> — Ngày: "${esc(w.day)}" | Buổi: "${esc(w.session)}"<br>
+          <span style="color:#555;">${esc(w.content).substring(0,80)}</span>
+        </div>
+      `).join('')}
+    </div>`;
+  }
+
+  if (timeWarnings.length > 0) {
+    listHtml += `<div style="background:#fff8e6;border:1px solid #f5deb3;border-radius:6px;padding:8px;margin-bottom:10px;">
+      <b style="color:#f0ad4e;">⚠️ Các sự kiện thiếu giờ (vẫn nhập):</b>
+      ${timeWarnings.map(w => `
+        <div style="padding:5px 0;border-top:1px dashed #f5deb3;font-size:12px;">
+          <b>${esc(w.day)} (${esc(w.session)})</b> — ${esc(w.content).substring(0,80)}
+        </div>
+      `).join('')}
+    </div>`;
+  }
+
+  listHtml += result.events.map(ev =>
     `<div style="padding:6px 0;border-bottom:1px solid #eee;">
       <b>${esc(ev.day)} (${ev.session==='S'?'Sáng':'Chiều'})</b> ${esc(ev.time)} — ${esc(ev.content)}<br>
       <small style="color:#888;">${esc(ev.leader)}${ev.location ? ' | ' + esc(ev.location) : ''}</small>
     </div>`
   ).join('');
+
+  document.getElementById('importPreviewList').innerHTML = listHtml;
   document.getElementById('importModal').classList.add('show');
 }
 function closeImportModal() {
